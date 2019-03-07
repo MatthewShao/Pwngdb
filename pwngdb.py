@@ -296,8 +296,22 @@ class PwngdbCmd(gdb.Command):
     def __init__(self):
         super(PwngdbCmd,self).__init__("pwngdb",gdb.COMMAND_USER)
 
+    def try_eval(self, expr):
+        try:
+            return gdb.parse_and_eval(expr)
+        except:
+            #print("Unable to parse expression: {}".format(expr))
+            return expr
+
+    def eval_argv(self, expressions):
+        """ Leave command alone, let GDB parse and evaluate arguments """
+        return [expressions[0]] + [ self.try_eval(expr) for expr in expressions[1:] ]
+
     def invoke(self,args,from_tty):
         self.dont_repeat()
+        # Don't eval expression in PwngdbCmd commands
+        #expressions = gdb.string_to_argv(args)
+        #arg = self.eval_argv(expressions)
         arg = args.split()
         if len(arg) > 0 :
             cmd = arg[0]
@@ -442,7 +456,7 @@ def gettls():
             return "error"
         return tlsaddr
     elif arch == "x86-64" :
-        gdb.execute("call arch_prctl(0x1003,$rsp-8)")
+        gdb.execute("call (int)arch_prctl(0x1003,$rsp-8)",to_string=True)
         data = gdb.execute("x/xg $rsp-8",to_string=True)
         return int(data.split(":")[1].strip(),16)
     else:
