@@ -133,7 +133,7 @@ class PwnCmd(object):
             print("========== function ==========")
             for f in magic_function :
                 print("\033[34m" + f  + ":" + "\033[33m" +hex(getoff(f))) 
-            print("\033[37m========== variables ==========")
+            print("\033[00m========== variables ==========")
             for v in magic_variable :
                 cmd = "x/" + word + "&" +v
                 content = gdb.execute(cmd,to_string=True).split(":")[1].strip()
@@ -607,11 +607,11 @@ def getfmtarg(addr):
     if arch == "i386" :
         start = get_reg("esp")
         idx = (addr- start)/4
-        print("The index of format argument : %d" % idx)
+        print("The index of format argument : %d (\"\%%%d$p\")" % (idx,idx - 1))
     elif arch == "x86-64" :
         start = get_reg("rsp")
         idx = (addr - start)/8 + 6
-        print("The index of format argument : %d" % idx)
+        print("The index of format argument : %d (\"\%%%d$p\")" % (idx,idx - 1))
     else :
         print("Not support the arch")
 

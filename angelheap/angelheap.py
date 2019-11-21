@@ -7,6 +7,7 @@ import subprocess
 import re
 import copy
 import struct
+import os
 # main_arena
 main_arena = 0
 main_arena_off = 0 
@@ -17,6 +18,7 @@ enable_thread = False
 tcache_enable = False
 tcache = None
 tcache_max_bin = 0
+tcache_counts_size = 1
 
 # chunks
 top = {}
@@ -25,6 +27,7 @@ fastbin = []
 fastchunk = [] #save fastchunk address for chunkinfo check
 tcache_entry = []
 tcache_count = []
+all_tcache_entry = [] #save tcache address for chunkinfo check
 last_remainder = {}
 unsortbin = []
 smallbin = {}  #{size:bin}
@@ -324,6 +327,25 @@ def getarch():
     else :
         return "error"
 
+def infoprocmap():
+    """ Use gdb command 'info proc map' to get the memory mapping """
+    """ Notice: No permission info """
+    resp = gdb.execute("info proc map", to_string=True).split("\n")
+    resp = '\n'.join(resp[i] for i  in range(4, len(resp))).strip().split("\n")
+    infomap = ""
+    for l in resp:
+        line = ""
+        first = True
+        for sep in l.split(" "):
+            if len(sep) != 0:
+                if first: # start address
+                    line += sep + "-"
+                    first = False
+                else:
+                    line += sep + " "
+        line = line.strip() + "\n"
+        infomap += line
+    return infomap
 
 def procmap():
     data = gdb.execute('info proc exe',to_string = True)
@@ -331,10 +353,14 @@ def procmap():
     if pid :
         pid = pid.group()
         pid = pid.split()[1]
-        maps = open("/proc/" + pid + "/maps","r")
-        infomap = maps.read()
-        maps.close()
-        return infomap
+        fpath = "/proc/" + pid + "/maps"
+        if os.path.isfile(fpath): # if file exist, read memory mapping directly from file
+            maps = open(fpath)
+            infomap = maps.read()
+            maps.close()
+            return infomap
+        else: # if file doesn't exist, use 'info proc map' to get the memory mapping
+            return infoprocmap()
     else :
         return "error"
 
@@ -503,14 +529,17 @@ def get_tcache():
     global tcache
     global tcache_enable
     global tcache_max_bin
+    global tcache_counts_size
     if capsize == 0 :
         arch = getarch()
     try :
         tcache_max_bin = int(gdb.execute("x/" + word + " &mp_.tcache_bins",to_string=True).split(":")[1].strip(),16)
         try :
             tcache_enable = True
-            result = gdb.execute("x/" + word + "&tcache",to_string=True)
-            tcache = int(result.split(":")[1].strip(),16)
+            tcache = int(gdb.execute("x/" + word + "&tcache",to_string=True).split(":")[1].strip(),16)
+            tps_size = int(gdb.execute("p sizeof(*tcache)",to_string=True).split("=")[1].strip())
+            if tps_size > 0x240:
+                tcache_counts_size = 2
         except :
             heapbase = get_heapbase()
             if heapbase != 0 :
@@ -521,6 +550,8 @@ def get_tcache():
                     cmd = "x/" + word + hex(heapbase + capsize*1)
                     f_size = int(gdb.execute(cmd,to_string=True).split(":")[1].strip(),16)
                 tcache = heapbase + capsize*2
+                if (f_size & ~7) - 0x10 > 0x240:
+                    tcache_counts_size = 2
             else :
                 tcache = 0
     except :
@@ -534,12 +565,12 @@ def get_tcache_count() :
         return
     if capsize == 0 :
         arch = getarch()
-    count_size = int(tcache_max_bin/capsize)
+    count_size = int(tcache_max_bin * tcache_counts_size / capsize)
     for i in range(count_size):
         cmd = "x/" + word + hex(tcache + i*capsize)
         c = int(gdb.execute(cmd,to_string=True).split(":")[1].strip(),16)
-        for j in range(capsize):
-            tcache_count.append((c >> j*8) & 0xff)
+        for j in range(int(capsize / tcache_counts_size)):
+            tcache_count.append((c >> j * 8*tcache_counts_size) & 0xff)
 
 def get_tcache_entry():
     global tcache_entry
@@ -551,7 +582,7 @@ def get_tcache_entry():
     if capsize == 0 :
         arch = getarch()
     if tcache and tcache_max_bin :
-        entry_start = tcache + tcache_max_bin
+        entry_start = tcache + tcache_max_bin * tcache_counts_size
         for i in range(tcache_max_bin):
             tcache_entry.append([])
             chunk = {}
@@ -571,6 +602,7 @@ def get_tcache_entry():
                 chunk["overlap"] = is_overlap
                 freememoryarea[hex(chunk["addr"])] = copy.deepcopy((chunk["addr"],chunk["addr"] + (capsize*2)*(i+2) ,chunk))
                 tcache_entry[i].append(copy.deepcopy(chunk))
+                all_tcache_entry.append(chunk["addr"])
                 cmd = "x/" + word + hex(chunk["addr"]+capsize*2)
                 chunk = {}
                 entry = int(gdb.execute(cmd,to_string=True).split(":")[1].strip(),16)
@@ -1015,6 +1047,8 @@ def chunkinfo(victim):
         if status:
             if chunkaddr in fastchunk :
                 print("\033[1;32mStatus : \033[1;34m Freed (fast) \033[37m")
+            elif chunkaddr in all_tcache_entry:
+                print("\033[1;32mStatus : \033[1;34m Freed (tcache) \033[37m")
             else :
                 print("\033[1;32mStatus : \033[31m Used \033[37m")
         else :
@@ -1163,7 +1197,10 @@ def put_tcache():
     if not tcache_enable :
         return
     for i,entry in enumerate(tcache_entry):
-        cursize = (capsize*2)*(i+2)
+        if capsize == 4 :
+            cursize = (8*2)*(i+1)
+        else :
+            cursize = (8*2)*(i+2)
         if len(tcache_entry[i]) > 0 :
             print("\033[33;1m(0x%02x)   tcache_entry[%d]\033[32m(%d)\033[33;1m:\033[37m " % (cursize,i,tcache_count[i]),end = "")
         elif tcache_count[i] > 0:            
@@ -1335,7 +1372,7 @@ def parse_heap(arena=None):
                 print("\033[31mCorrupt ?! \033[0m(size == 0) (0x%x)" % chunkaddr)
                 break 
             if status :
-                if chunkaddr in fastchunk :
+                if chunkaddr in fastchunk or chunkaddr in all_tcache_entry:
                     msg = "\033[1;34m Freed \033[0m"
                     print('0x{:<18x}0x{:<18x}0x{:<18x}{:<16}{:>18}{:>18}'.format(chunkaddr, prev_size, size, msg, hex(fd), "None"))
                 else :
